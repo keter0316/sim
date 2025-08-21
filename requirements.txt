@@ -1,0 +1,6 @@
+streamlit
+gradio
+networkx
+pandas
+numpy
+matplotlib

@@ -1,0 +1,7 @@
+edge,class,topic,src,dst,rate_mbps,flow_index,path
+s1-s2,EF,vc/roomA/#,s1,*,300.0,room:roomA,<steiner_mst>
+s2-s3,EF,vc/roomA/#,s1,*,300.0,room:roomA,<steiner_mst>
+s3-s4,EF,vc/roomA/#,s1,*,240.0,room:roomA,<steiner_mst>
+s4-s5,EF,vc/roomA/#,s1,*,180.0,room:roomA,<steiner_mst>
+s5-s6,EF,vc/roomA/#,s1,*,120.0,room:roomA,<steiner_mst>
+s6-s7,EF,vc/roomA/#,s1,*,60.0,room:roomA,<steiner_mst>

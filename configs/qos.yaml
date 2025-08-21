@@ -1,0 +1,75 @@
+reservations:
+  EF:   { share: 0.15, weight: null, queue: Q0 }   # SP，weight 無效
+  CS5:  { share: 0.10, weight: 12,  queue: Q1 }
+  AF41: { share: 0.12, weight: 10,  queue: Q2 }
+  AF31: { share: 0.10, weight:  8,  queue: Q3 }
+  AF21: { share: 0.13, weight:  6,  queue: Q4 }
+  AF11: { share: 0.10, weight:  2,  queue: Q6 }
+  CS3:  { share: 0.05, weight:  4,  queue: Q5 }
+  BE:   { share: 0.15, weight:  1,  queue: Q7 }
+
+
+topic_map:
+  vc/#:
+    dscp: 46
+    pcp: 5
+    prio: 7
+    queue: 0
+    importance: 4
+    qos: EF
+
+  control/#:
+    dscp: 40
+    pcp: 6
+    prio: 6
+    queue: 1
+    importance: 5
+    qos: CS5
+
+  alerts/#:
+    dscp: 34
+    pcp: 4
+    prio: 5
+    queue: 2
+    importance: 4
+    qos: AF41
+
+  telemetry/#:
+    dscp: 18
+    pcp: 3
+    prio: 4
+    queue: 3
+    importance: 3
+    qos: AF31
+
+  streaming/#:
+    dscp: 26
+    pcp: 2
+    prio: 3
+    queue: 4
+    importance: 2
+    qos: AF21
+
+  transaction/#:
+    dscp: 24
+    pcp: 2
+    prio: 2
+    queue: 5
+    importance: 3
+    qos: CS3
+
+  normal/#:
+    dscp: 10
+    pcp: 1
+    prio: 1
+    queue: 6
+    importance: 1
+    qos: AF11
+
+  bulk/#:
+    dscp: 0
+    pcp: 0
+    prio: 0
+    queue: 7
+    importance: 1
+    qos: CS0

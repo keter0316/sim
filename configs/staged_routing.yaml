@@ -1,0 +1,41 @@
+stages:
+  - name: vc_steiner
+    match: { topics_prefix: ["vc/"], min_dsts: 2 }
+    algo: steiner_mst_pinned
+    root_mode: auto_medoid
+    root:
+      scope: core               # 只在角色=core 的節點內挑（或 candidates）
+      hysteresis_pct: 10        # 新根至少好 10% 才換
+      min_stick_ms: 2000        # 最少持續時間
+      candidates: []            # 若你想半控，可填 ["S3","S5","S7"]
+    pin: true
+    pin_evict:
+      sla_break_ms: 500         # 連續 500ms 違反 SLA 才解 pin
+      cost_worse_pct: 20        # 成本變糟 20% 以上才重算
+
+  - name: high_spb_ecmp
+    match: { classes: ["CS5","AF41","AF31","AF21"] }
+    algo: spb_ecmp
+    ecmp:
+      k: 8
+      hash_scope: flow
+      weight: residual          # equal | residual | headroom
+
+  - name: low_additional
+    match: { any: true }
+    algo: additional_paths
+    additional:
+      k: 6
+      prefilter: sla_and_cap    # 先過 SLA/容量再納入候選
+
+flow_pipeline:
+  consume_on_success: true
+  max_attempts_per_stage: 3
+
+downgrade_chain:
+  EF:  ["CS5","AF41","AF31","AF21","BE"]
+  CS5: ["AF41","AF31","AF21","BE"]
+  AF41:["AF31","AF21","BE"]
+  AF31:["AF21","BE"]
+  AF21:["BE"]
+  BE:  []

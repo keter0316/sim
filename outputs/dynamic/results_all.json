@@ -1,0 +1,302 @@
+[
+  {
+    "src": "s1",
+    "dst": "s5",
+    "topic": "vc/#",
+    "rate_mbps": 10,
+    "result": "OK",
+    "class": "EF",
+    "path": [
+      "s1",
+      "s9",
+      "s5"
+    ],
+    "rate": 10.0,
+    "pinned": true,
+    "reason": "ok_pinned",
+    "tick": 0
+  },
+  {
+    "src": "s2",
+    "dst": "s9",
+    "topic": "telemetry/#",
+    "rate_mbps": 2,
+    "result": "OK",
+    "class": "AF21",
+    "path": [
+      "s2",
+      "s9"
+    ],
+    "rate": 2.0,
+    "pinned": false,
+    "reason": "ok",
+    "tick": 0
+  },
+  {
+    "src": "s8",
+    "dst": "s3",
+    "topic": "bulk/#",
+    "rate_mbps": 50,
+    "result": "OK",
+    "class": "BE",
+    "path": [
+      "s8",
+      "s9",
+      "s3"
+    ],
+    "rate": 50.0,
+    "pinned": false,
+    "reason": "ok",
+    "tick": 0
+  },
+  {
+    "src": "s1",
+    "dst": "s5",
+    "topic": "vc/#",
+    "rate_mbps": 15,
+    "result": "OK",
+    "class": "EF",
+    "path": [
+      "s1",
+      "s9",
+      "s5"
+    ],
+    "rate": 15.0,
+    "pinned": true,
+    "reason": "ok_pinned",
+    "tick": 1
+  },
+  {
+    "src": "s2",
+    "dst": "s9",
+    "topic": "telemetry/#",
+    "rate_mbps": 2,
+    "result": "OK",
+    "class": "AF21",
+    "path": [
+      "s2",
+      "s9"
+    ],
+    "rate": 2.0,
+    "pinned": false,
+    "reason": "ok",
+    "tick": 1
+  },
+  {
+    "src": "s8",
+    "dst": "s3",
+    "topic": "bulk/#",
+    "rate_mbps": 50,
+    "result": "OK",
+    "class": "BE",
+    "path": [
+      "s8",
+      "s9",
+      "s3"
+    ],
+    "rate": 50.0,
+    "pinned": false,
+    "reason": "ok",
+    "tick": 1
+  },
+  {
+    "src": "s1",
+    "dst": "s5",
+    "topic": "vc/#",
+    "rate_mbps": 20,
+    "result": "OK",
+    "class": "EF",
+    "path": [
+      "s1",
+      "s9",
+      "s5"
+    ],
+    "rate": 20.0,
+    "pinned": true,
+    "reason": "ok_pinned",
+    "tick": 2
+  },
+  {
+    "src": "s2",
+    "dst": "s9",
+    "topic": "telemetry/#",
+    "rate_mbps": 2,
+    "result": "OK",
+    "class": "AF21",
+    "path": [
+      "s2",
+      "s9"
+    ],
+    "rate": 2.0,
+    "pinned": false,
+    "reason": "ok",
+    "tick": 2
+  },
+  {
+    "src": "s8",
+    "dst": "s3",
+    "topic": "bulk/#",
+    "rate_mbps": 50,
+    "result": "OK",
+    "class": "BE",
+    "path": [
+      "s8",
+      "s9",
+      "s3"
+    ],
+    "rate": 50.0,
+    "pinned": false,
+    "reason": "ok",
+    "tick": 2
+  },
+  {
+    "src": "s1",
+    "dst": "s5",
+    "topic": "vc/#",
+    "rate_mbps": 25,
+    "result": "OK",
+    "class": "EF",
+    "path": [
+      "s1",
+      "s9",
+      "s5"
+    ],
+    "rate": 25.0,
+    "pinned": true,
+    "reason": "ok_pinned",
+    "tick": 3
+  },
+  {
+    "src": "s2",
+    "dst": "s9",
+    "topic": "telemetry/#",
+    "rate_mbps": 2,
+    "result": "OK",
+    "class": "AF21",
+    "path": [
+      "s2",
+      "s9"
+    ],
+    "rate": 2.0,
+    "pinned": false,
+    "reason": "ok",
+    "tick": 3
+  },
+  {
+    "src": "s8",
+    "dst": "s3",
+    "topic": "bulk/#",
+    "rate_mbps": 50,
+    "result": "OK",
+    "class": "BE",
+    "path": [
+      "s8",
+      "s9",
+      "s3"
+    ],
+    "rate": 50.0,
+    "pinned": false,
+    "reason": "ok",
+    "tick": 3
+  },
+  {
+    "src": "s1",
+    "dst": "s5",
+    "topic": "vc/#",
+    "rate_mbps": 30,
+    "result": "OK",
+    "class": "EF",
+    "path": [
+      "s1",
+      "s9",
+      "s5"
+    ],
+    "rate": 30.0,
+    "pinned": true,
+    "reason": "ok_pinned",
+    "tick": 4
+  },
+  {
+    "src": "s2",
+    "dst": "s9",
+    "topic": "telemetry/#",
+    "rate_mbps": 2,
+    "result": "OK",
+    "class": "AF21",
+    "path": [
+      "s2",
+      "s9"
+    ],
+    "rate": 2.0,
+    "pinned": false,
+    "reason": "ok",
+    "tick": 4
+  },
+  {
+    "src": "s8",
+    "dst": "s3",
+    "topic": "bulk/#",
+    "rate_mbps": 50,
+    "result": "OK",
+    "class": "BE",
+    "path": [
+      "s8",
+      "s9",
+      "s3"
+    ],
+    "rate": 50.0,
+    "pinned": false,
+    "reason": "ok",
+    "tick": 4
+  },
+  {
+    "src": "s1",
+    "dst": "s5",
+    "topic": "vc/#",
+    "rate_mbps": 35,
+    "result": "OK",
+    "class": "EF",
+    "path": [
+      "s1",
+      "s9",
+      "s5"
+    ],
+    "rate": 35.0,
+    "pinned": true,
+    "reason": "ok_pinned",
+    "tick": 5
+  },
+  {
+    "src": "s2",
+    "dst": "s9",
+    "topic": "telemetry/#",
+    "rate_mbps": 2,
+    "result": "OK",
+    "class": "AF21",
+    "path": [
+      "s2",
+      "s9"
+    ],
+    "rate": 2.0,
+    "pinned": false,
+    "reason": "ok",
+    "tick": 5
+  },
+  {
+    "src": "s8",
+    "dst": "s3",
+    "topic": "bulk/#",
+    "rate_mbps": 50,
+    "result": "OK",
+    "class": "BE",
+    "path": [
+      "s8",
+      "s9",
+      "s3"
+    ],
+    "rate": 50.0,
+    "pinned": false,
+    "reason": "ok",
+    "tick": 5
+  }
+]
