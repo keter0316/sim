@@ -1,7 +1,0 @@
-[
-  {"src":"s3","dst":"s4","topic":"vc/roomA/#","rate_mbps":30},
-  {"src":"s6","dst":"s7","topic":"vc/roomA/#","rate_mbps":30},
-  {"src":"s1","dst":"s6","topic":"vc/roomA/#","rate_mbps":30},
-  {"src":"s4","dst":"s6","topic":"vc/roomA/#","rate_mbps":30},
-  {"src":"s3","dst":"s5","topic":"vc/roomA/#","rate_mbps":30}
-]
