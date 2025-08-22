@@ -1,6 +1,7 @@
 streamlit
 gradio
-networkx
+networkx>=2.8
 pandas
-numpy
+numpy>=1.24
 matplotlib
+PyYAML>=6.0
