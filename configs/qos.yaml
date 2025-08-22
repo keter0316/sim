@@ -7,14 +7,14 @@ headroom: 0.10
 # - weight  ：WFQ/DRR 權重（Q0 為 SP 故可為 null）
 # - queue   ：對應內部佇列（Q0..Q7）
 reservations:
-  EF:   { min_mbps: 4,  share: 0.15, weight: null, queue: 0 }   # Q0：嚴格優先（SP）
-  CS5:  { min_mbps: 3,  share: 0.10, weight: 12,   queue: 1 }   # Q1
-  AF41: { min_mbps: 3,  share: 0.12, weight: 10,   queue: 2 }   # Q2
-  AF31: { min_mbps: 2,  share: 0.10, weight:  8,   queue: 3 }   # Q3（可用於次要保證）
-  AF21: { min_mbps: 2,  share: 0.13, weight:  6,   queue: 4 }   # Q4
-  CS3:  { min_mbps: 1,  share: 0.05, weight:  4,   queue: 5 }   # Q5
-  AF11: { min_mbps: 1,  share: 0.10, weight:  2,   queue: 6 }   # Q6
-  CS0:  { min_mbps: 0,  share: 0.15, weight:  1,   queue: 7 }   # Q7（Best Effort）
+  EF:   {   share: 0.15, weight: null, queue: 0 }   # Q0：嚴格優先（SP）
+  CS5:  {   share: 0.10, weight: 12,   queue: 1 }   # Q1
+  AF41: {  share: 0.12, weight: 10,   queue: 2 }   # Q2
+  AF31: {   share: 0.10, weight:  8,   queue: 3 }   # Q3（可用於次要保證）
+  AF21: {   share: 0.13, weight:  6,   queue: 4 }   # Q4
+  CS3:  {   share: 0.05, weight:  4,   queue: 5 }   # Q5
+  AF11: {   share: 0.10, weight:  2,   queue: 6 }   # Q6
+  CS0:  {  share: 0.15, weight:  1,   queue: 7 }   # Q7（Best Effort）
 
 # CSPF 用的成本權重與（可選）SLA 目標
 classes:

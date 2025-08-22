@@ -1,6 +1,6 @@
 # routing/steiner.py
 from __future__ import annotations
-
+import re
 import argparse
 import csv
 from dataclasses import dataclass
@@ -18,6 +18,12 @@ except Exception:  # pragma: no cover
 # ------------------------------
 # 小工具
 # ------------------------------
+
+def _split_list(s: str) -> list[str]:
+    s = (s or "").strip()
+    if not s:
+        return []
+    return [x for x in re.split(r"[,\|\s;]+", s) if x]
 
 def _edge_key(u: str, v: str) -> Tuple[str, str]:
     return (u, v) if u <= v else (v, u)
@@ -229,7 +235,6 @@ def local_edge_swaps(
                 T.remove_edge(u, v)
 
         # 可能經過一輪仍無改善
-    _prune_leaves(T, set(T.nodes))  # 只會修剪非終端葉；終端集合在外層控制
     return T, logs
 
 # ------------------------------
@@ -249,15 +254,50 @@ def tree_from_edges(edges: Iterable[Tuple[str,str]]) -> nx.Graph:
 # 7) I/O & CLI：讀 flows，為每個多播流建樹並輸出 CSV
 # ------------------------------
 
+def load_flows_with_subs(flows_csv: Path) -> List[Dict[str, str]]:
+    """
+    支援欄位：
+      id, src, dst, topic, rate_mbps, start_s, duration_s, subs
+    - subs 欄位優先；若 subs 空，會從 dst 裡切出多個
+    - 允許 dst 或 subs 用 | , ; 空白 任一分隔
+    """
+    rows: List[Dict[str, str]] = []
+    with flows_csv.open(newline="", encoding="utf-8") as f:
+        reader = csv.DictReader(f)
+        for r in reader:
+            if not r or (r.get("id") or "").startswith("#"):
+                continue
+            # 規範化欄位（避免 KeyError）
+            rr = {k.strip(): (v or "").strip() for k, v in r.items()}
+            src  = rr.get("src", "")
+            dst  = rr.get("dst", "")
+            subs = rr.get("subs", "")
+
+            subs_list = _split_list(subs)
+            if not subs_list:
+                subs_list = _split_list(dst)
+
+            rr["subs_list"] = subs_list      # 額外附上一個已解析的 list
+            rr["rate_mbps"] = rr.get("rate_mbps", "")
+            rr["start_s"]   = rr.get("start_s", "")
+            rr["duration_s"]= rr.get("duration_s", "")
+            rows.append(rr)
+    return rows
+
 def read_edges_graph(edges_csv: Path, weight: str = "weight") -> nx.Graph:
     G = nx.Graph()
     with edges_csv.open(newline="", encoding="utf-8") as f:
         for row in csv.DictReader(f):
             u = row["src_switch"].strip()
             v = row["dst_switch"].strip()
-            w = float(row.get("weight", 1.0))
+            w_raw = row.get(weight) or row.get("weight") or 1.0
+            try:
+                w = float(w_raw)
+            except Exception:
+                w = 1.0
             G.add_edge(u, v, weight=w)
     return G
+
 
 def read_flows(flows_csv: Path) -> List[dict]:
     flows = []
@@ -273,7 +313,8 @@ def parse_subs(s: str) -> List[str]:
     s = (s or "").strip()
     if not s:
         return []
-    return [x.strip() for x in s.replace(";", ",").split(",") if x.strip()]
+    # 支援 , ; | 與任意空白
+    return [x for x in re.split(r"[,\|\s;]+", s) if x]
 
 def build_tree_for_flow(
     G: nx.Graph,
@@ -303,7 +344,7 @@ def build_tree_for_flow(
 def build_cli() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(description="Steiner tree (MST / Greedy attach) for Pub/Sub multicast")
     ap.add_argument("--edges", type=str, required=True, help="outputs/matrix/edges_all.csv")
-    ap.add_argument("--flows", type=str, required=True, help="configs/flows.csv（需含 subs）")
+    ap.add_argument("--flows", type=str, required=True,help="configs/flows.csv（多播：優先讀 subs；若空則從 dst 切出多個，支援逗點/分號/管線/空白）")
     ap.add_argument("--out-trees", type=str, default="outputs/flows/trees.csv")
     ap.add_argument("--out-reroutes", type=str, default="outputs/flows/reroutes.csv")
     ap.add_argument("--weight", type=str, default="weight", help="邊權重欄位（預設 weight）")
@@ -319,10 +360,10 @@ def main() -> None:
     out_trees = Path(args.out_trees); out_trees.parent.mkdir(parents=True, exist_ok=True)
     out_rr    = Path(args.out_reroutes); out_rr.parent.mkdir(parents=True, exist_ok=True)
 
+    # 讀圖時尊重 --weight 參數欄位
     G = read_edges_graph(edges_csv, weight=args.weight)
     flows = read_flows(flows_csv)
 
-    # trees.csv
     with out_trees.open("w", newline="", encoding="utf-8") as ft, out_rr.open("w", newline="", encoding="utf-8") as fr:
         wt = csv.writer(ft)
         wr = csv.writer(fr)
@@ -330,16 +371,24 @@ def main() -> None:
         wr.writerow(["flow_id","step","add_edge","drop_edge","delta_cost","new_total_cost"])
 
         for row in flows:
-            fid  = (row.get("id") or "").strip() or f"flow{len(row)}"
-            pub  = (row.get("src") or "").strip()
-            topic= (row.get("topic") or "").strip()
+            fid   = (row.get("id") or "").strip() or f"flow{len(row)}"
+            pub   = (row.get("src") or "").strip()
+
+            # 1) 先取 subs；若空則 fallback 到 dst
             subs = parse_subs(row.get("subs"))
-
-            # 非多播流（或 subs 為空）就跳過
             if not subs:
-                continue
-            terms = [pub] + subs
+                subs = parse_subs(row.get("dst"))
 
+            # 2) 基礎檢查：pub/節點必須存在於圖；subs 去掉不存在於圖與等於 pub 的節點
+            if not pub or pub not in G:
+                # 若需要除錯：print(f"[skip] {fid}: src '{pub}' not in graph")
+                continue
+            subs = sorted({s for s in subs if s in G and s != pub})
+            if not subs:
+                # 若需要除錯：print(f"[skip] {fid}: no valid subscribers (after filtering) in graph")
+                continue
+
+            # 3) 建樹 + 局部替換
             T, logs = build_tree_for_flow(
                 G, pub, subs,
                 method=args.mode,
@@ -347,7 +396,8 @@ def main() -> None:
                 swap_pct=float(args.swap_pct),
                 swap_iter=int(args.swap_iters)
             )
-            # 統計
+
+            # 4) 輸出
             cost = steiner_tree_cost(G, T, weight=args.weight)
             edges_ser = ";".join(f"{u}-{v}" for u, v in sorted(tree_edges_list(T)))
             wt.writerow([fid, args.mode, pub, ";".join(subs), T.number_of_edges(), f"{cost:.6f}", edges_ser, len(logs)])
@@ -364,6 +414,7 @@ def main() -> None:
 
     print(f"[OK] trees written   -> {out_trees}")
     print(f"[OK] reroutes written-> {out_rr}")
+
 
 
 if __name__ == "__main__":
