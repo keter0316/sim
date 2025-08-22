@@ -1,75 +1,41 @@
+# 連線保留使用的安全餘裕（Admission：usage <= reserve * (1 - headroom)）
+headroom: 0.10
+
+# 每個服務等級的保留與排程屬性
+# - min_mbps：絕對保留（優先於 share）
+# - share   ：按鏈路帶寬比例（0..1），當 min_mbps 未設定時使用
+# - weight  ：WFQ/DRR 權重（Q0 為 SP 故可為 null）
+# - queue   ：對應內部佇列（Q0..Q7）
 reservations:
-  EF:   { share: 0.15, weight: null, queue: Q0 }   # SP，weight 無效
-  CS5:  { share: 0.10, weight: 12,  queue: Q1 }
-  AF41: { share: 0.12, weight: 10,  queue: Q2 }
-  AF31: { share: 0.10, weight:  8,  queue: Q3 }
-  AF21: { share: 0.13, weight:  6,  queue: Q4 }
-  AF11: { share: 0.10, weight:  2,  queue: Q6 }
-  CS3:  { share: 0.05, weight:  4,  queue: Q5 }
-  BE:   { share: 0.15, weight:  1,  queue: Q7 }
+  EF:   { min_mbps: 4,  share: 0.15, weight: null, queue: 0 }   # Q0：嚴格優先（SP）
+  CS5:  { min_mbps: 3,  share: 0.10, weight: 12,   queue: 1 }   # Q1
+  AF41: { min_mbps: 3,  share: 0.12, weight: 10,   queue: 2 }   # Q2
+  AF31: { min_mbps: 2,  share: 0.10, weight:  8,   queue: 3 }   # Q3（可用於次要保證）
+  AF21: { min_mbps: 2,  share: 0.13, weight:  6,   queue: 4 }   # Q4
+  CS3:  { min_mbps: 1,  share: 0.05, weight:  4,   queue: 5 }   # Q5
+  AF11: { min_mbps: 1,  share: 0.10, weight:  2,   queue: 6 }   # Q6
+  CS0:  { min_mbps: 0,  share: 0.15, weight:  1,   queue: 7 }   # Q7（Best Effort）
 
+# CSPF 用的成本權重與（可選）SLA 目標
+classes:
+  EF:   { alpha: 0.5, beta: 0.3, gamma: 0.8, delta: 0.8, sla: { maxDelay_ms: 30,  maxLoss: 0.001 } }
+  CS5:  { alpha: 0.5, beta: 0.3, gamma: 0.8, delta: 0.8, sla: { maxDelay_ms: 50,  maxLoss: 0.001 } }
+  AF41: { alpha: 0.5, beta: 0.3, gamma: 0.7, delta: 0.7, sla: { maxDelay_ms: 80,  maxLoss: 0.005 } }
+  AF21: { alpha: 0.5, beta: 0.3, gamma: 0.6, delta: 0.6, sla: { maxDelay_ms: 120, maxLoss: 0.01  } }
+  CS0:  { alpha: 0.5, beta: 0.3, gamma: 0.5, delta: 0.5 }
 
+# 主題到 QoS 類別的對應（依 PPT）
 topic_map:
-  vc/#:
-    dscp: 46
-    pcp: 5
-    prio: 7
-    queue: 0
-    importance: 4
-    qos: EF
+  vc/#:                { dscp: 46, pcp: 5, prio: 7, queue: 0, importance: 4, class: EF   }   # 視訊會議
+  control/#:           { dscp: 40, pcp: 6, prio: 6, queue: 1, importance: 5, class: CS5  }   # 控制指令
+  alerts/#:            { dscp: 34, pcp: 4, prio: 5, queue: 2, importance: 4, class: AF41 }   # 告警
+  telemetry/#:         { dscp: 18, pcp: 3, prio: 4, queue: 4, importance: 3, class: AF21 }   # 遙測
+  bulk/#:              { dscp:  0, pcp: 0, prio: 0, queue: 7, importance: 1, class: CS0  }   # 大量/更新
 
-  control/#:
-    dscp: 40
-    pcp: 6
-    prio: 6
-    queue: 1
-    importance: 5
-    qos: CS5
-
-  alerts/#:
-    dscp: 34
-    pcp: 4
-    prio: 5
-    queue: 2
-    importance: 4
-    qos: AF41
-
-  telemetry/#:
-    dscp: 18
-    pcp: 3
-    prio: 4
-    queue: 3
-    importance: 3
-    qos: AF31
-
-  streaming/#:
-    dscp: 26
-    pcp: 2
-    prio: 3
-    queue: 4
-    importance: 2
-    qos: AF21
-
-  transaction/#:
-    dscp: 24
-    pcp: 2
-    prio: 2
-    queue: 5
-    importance: 3
-    qos: CS3
-
-  normal/#:
-    dscp: 10
-    pcp: 1
-    prio: 1
-    queue: 6
-    importance: 1
-    qos: AF11
-
-  bulk/#:
-    dscp: 0
-    pcp: 0
-    prio: 0
-    queue: 7
-    importance: 1
-    qos: CS0
+# （可選）降級鏈，CSPF admission 失敗時按順序嘗試
+downgrade_chain:
+  EF:   [AF41, AF21, CS0]
+  CS5:  [AF41, AF21, CS0]
+  AF41: [AF21, CS0]
+  AF21: [CS0]
+  CS0:  []

@@ -1,35 +1,45 @@
 # routing/steiner.py
 from __future__ import annotations
-from typing import List, Dict, Tuple, Optional, Iterable
+
+import argparse
+import csv
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Iterable, List, Dict, Tuple, Optional
+
 import networkx as nx
 
-# 可選：若你要直接在這支檔內做 admission
+# 可選：若要做實際資源入場控管，從 models.queues 匯入；不存在就跳過
 try:
-    from models.queues import admit_edge, release_edge, norm_class  # 已存在於你的專案
-except Exception:
-    admit_edge = release_edge = norm_class = None  # 允許純演算法使用
-
+    from models.queues import admit_edge, release_edge, norm_class  # optional
+except Exception:  # pragma: no cover
+    admit_edge = release_edge = norm_class = None  # type: ignore
 
 # ------------------------------
-# 基本工具
+# 小工具
 # ------------------------------
-def _path_cost(G: nx.Graph, path: List[str], weight: str = "w") -> float:
-    return sum(G[path[i]][path[i+1]].get(weight, 1.0) for i in range(len(path)-1))
+
+def _edge_key(u: str, v: str) -> Tuple[str, str]:
+    return (u, v) if u <= v else (v, u)
+
+def _path_cost(G: nx.Graph, path: List[str], weight: str = "weight") -> float:
+    return sum(float(G[path[i]][path[i+1]].get(weight, 1.0)) for i in range(len(path)-1))
 
 def _prune_leaves(T: nx.Graph, terminals: set):
-    prunable = True
-    while prunable:
-        prunable = False
+    # 修剪度=1 且非終端的葉子
+    changed = True
+    while changed:
+        changed = False
         for n in list(T.nodes):
             if n not in terminals and T.degree(n) == 1:
                 T.remove_node(n)
-                prunable = True
-
+                changed = True
 
 # ------------------------------
-# root SPT（保留，給 SPT 需求用；本題用 MST）
+# 1) Root SPT（保留：有些場景會用；本題主角是 MST）
 # ------------------------------
-def root_spt_tree(G: nx.Graph, root: str, terminals: List[str], weight: str = "w") -> nx.Graph:
+
+def root_spt_tree(G: nx.Graph, root: str, terminals: List[str], weight: str = "weight") -> nx.Graph:
     T = nx.Graph()
     T.add_node(root)
     for t in terminals:
@@ -43,15 +53,16 @@ def root_spt_tree(G: nx.Graph, root: str, terminals: List[str], weight: str = "w
             pass
     return T
 
+# ------------------------------
+# 2) Steiner 近似：Metric-closure MST
+# ------------------------------
 
-# ------------------------------
-# Steiner 近似：metric-closure MST
-# ------------------------------
-def steiner_tree_mst(G: nx.Graph, terminals: List[str], weight: str = "w") -> nx.Graph:
-    Tset = list(dict.fromkeys(terminals))
+def steiner_tree_mst(G: nx.Graph, terminals: List[str], weight: str = "weight") -> nx.Graph:
+    Tset = list(dict.fromkeys(terminals))  # 保序去重
     if len(Tset) <= 1:
         T = nx.Graph(); T.add_nodes_from(Tset); return T
 
+    # metric closure
     sp_cache: Dict[Tuple[str, str], Tuple[float, List[str]]] = {}
     K = nx.Graph()
     for i in range(len(Tset)):
@@ -62,14 +73,14 @@ def steiner_tree_mst(G: nx.Graph, terminals: List[str], weight: str = "w") -> nx
                 c = _path_cost(G, p, weight)
                 sp_cache[(s, t)] = (c, p)
                 sp_cache[(t, s)] = (c, list(reversed(p)))
-                K.add_edge(s, t, w=c)
+                K.add_edge(s, t, weight=c)
             except nx.NetworkXNoPath:
                 continue
 
     if K.number_of_edges() == 0:
         T = nx.Graph(); T.add_nodes_from(Tset); return T
 
-    mst = nx.minimum_spanning_tree(K, weight="w")
+    mst = nx.minimum_spanning_tree(K, weight="weight")
 
     T = nx.Graph()
     for u, v in mst.edges:
@@ -80,247 +91,280 @@ def steiner_tree_mst(G: nx.Graph, terminals: List[str], weight: str = "w") -> nx
     _prune_leaves(T, set(Tset))
     return T
 
-def steiner_tree_cost(G: nx.Graph, terminals: List[str], weight: str = "w") -> float:
-    """回傳 Steiner-MST 的總邊權重（展開後的原圖邊，去重後求和）。"""
-    T = steiner_tree_mst(G, terminals, weight=weight)
+def steiner_tree_cost(G: nx.Graph, T: nx.Graph, weight: str = "weight") -> float:
     total = 0.0
     for u, v in T.edges:
         total += float(G[u][v].get(weight, 1.0))
     return total
 
-
 # ------------------------------
-# 逐人加入（增量）
+# 3) 增量 Greedy Attach
 # ------------------------------
-def steiner_extend_greedy(G: nx.Graph, T: nx.Graph, new_terms: Iterable[str], weight: str = "w") -> nx.Graph:
-    if T.number_of_nodes() == 0:
-        return steiner_tree_mst(G, list(new_terms), weight=weight)
 
-    T2 = T.copy()
-    for t in new_terms:
-        if t in T2:
+def steiner_extend_greedy(G: nx.Graph, terminals: List[str], weight: str = "weight") -> nx.Graph:
+    """從第一個 terminal 起步，逐一把其餘節點接到現有樹的最近點。"""
+    if not terminals:
+        return nx.Graph()
+    T = nx.Graph()
+    T.add_node(terminals[0])
+    present = {terminals[0]}
+    remain = [t for t in terminals[1:] if t not in present]
+
+    while remain:
+        best = None
+        best_cost = float("inf")
+        attach = None
+        for t in remain:
+            for v in T.nodes:
+                try:
+                    p = nx.shortest_path(G, v, t, weight=weight)
+                    c = _path_cost(G, p, weight)
+                    if c < best_cost or (c == best_cost and tuple(p) < tuple(best or ())):
+                        best_cost = c; best = p; attach = t
+                except nx.NetworkXNoPath:
+                    continue
+        if best is None:
+            # 不可達：跳過該點
+            remain.pop(0)
             continue
-        best_cost, best_path = None, None
-        for v in T2.nodes:
-            try:
-                p = nx.shortest_path(G, v, t, weight=weight)
-                c = _path_cost(G, p, weight)
-                if best_cost is None or c < best_cost:
-                    best_cost, best_path = c, p
-            except nx.NetworkXNoPath:
-                continue
-        if best_path:
-            T2.add_nodes_from(best_path)
-            T2.add_edges_from((best_path[i], best_path[i+1]) for i in range(len(best_path)-1))
-    return T2
+        T.add_nodes_from(best)
+        T.add_edges_from((best[i], best[i+1]) for i in range(len(best)-1))
+        present.add(attach)
+        remain = [t for t in remain if t != attach]
 
+    _prune_leaves(T, set(terminals))
+    return T
 
 # ------------------------------
-# Root 選擇（MST成本最小）
+# 4) Root 選擇（以 MST 成本最小作為 root 候選）
 # ------------------------------
-def choose_root_by_medoid(G: nx.Graph, terminals: List[str], weight: str = "w") -> str:
-    best, best_sum = terminals[0], float("inf")
-    for r in terminals:
-        s = 0.0
-        ok = True
-        for t in terminals:
-            if t == r: 
-                continue
-            try:
-                p = nx.shortest_path(G, r, t, weight=weight)
-                s += _path_cost(G, p, weight)
-            except nx.NetworkXNoPath:
-                ok = False; break
-        if ok and s < best_sum:
-            best, best_sum = r, s
-    return best
 
-def choose_root_by_mst_cost(
-    G: nx.Graph,
-    terminals: List[str],
-    candidate_switches: List[str],
-    weight: str = "w"
-) -> Optional[str]:
-    """
-    在 candidate_switches（通常為所有 s*）中，挑一個 root，使
-      cost(root) = cost(SteinerMST( terminals ∪ {root} ))
-    最小。若皆不可達，回傳 None。
-    """
+def choose_root_by_mst_cost(G: nx.Graph, terminals: List[str], candidates: List[str], weight: str = "weight") -> Optional[str]:
     best_root, best_cost = None, float("inf")
-    Tset = list(dict.fromkeys(terminals))  # 去重
-    for r in candidate_switches:
+    Tset = list(dict.fromkeys(terminals))
+    for r in sorted(candidates):
         terms_aug = sorted(set(Tset + [r]))
-        try:
-            c = steiner_tree_cost(G, terms_aug, weight=weight)
-        except Exception:
-            continue
-        if c < best_cost:
+        T = steiner_tree_mst(G, terms_aug, weight=weight)
+        c = steiner_tree_cost(G, T, weight=weight)
+        if c < best_cost or (c == best_cost and (best_root is None or r < best_root)):
             best_cost, best_root = c, r
-        elif c == best_cost and best_root is not None and str(r) < str(best_root):
-            # 穩定化 tie-break：名字小者
-            best_root = r
     return best_root
 
+# ------------------------------
+# 5) 局部邊替換（single-edge swap）
+# ------------------------------
 
-# ------------------------------
-# 擁塞感知權重
-# ------------------------------
-def congestion_weighted_copy(
+@dataclass
+class SwapLog:
+    add_edge: Tuple[str, str]
+    drop_edge: Tuple[str, str]
+    delta_cost: float   # 正值代表成本下降多少
+    new_total: float
+
+def local_edge_swaps(
     G: nx.Graph,
-    reserved: Dict[Tuple[str,str], Dict[str,float]],
-    usage:    Dict[Tuple[str,str], Dict[str,float]],
-    pool_cls: str = "EF",
-    alpha: float = 2.0,
-    base_weight_attr: str = "w",
-    out_attr: str = "w_ca"
-) -> nx.Graph:
-    H = G.copy()
-    for u, v, d in H.edges(data=True):
-        ekey = tuple(sorted((u, v)))
-        base_w = float(d.get(base_weight_attr, 1.0))
-        r_pool = float(reserved.get(ekey, {}).get(pool_cls, 0.0))
-        u_pool = float(usage.get(ekey, {}).get(pool_cls, 0.0))
-        util = (u_pool / r_pool) if r_pool > 0 else 0.0
-        if util < 0: util = 0.0
-        d[out_attr] = base_w * (1.0 + alpha * util)
-    return H
-
-
-# ------------------------------
-# 載荷計算（SFU 雙向）
-# ------------------------------
-def tree_edge_loads_bidir(
     T: nx.Graph,
-    root: str,
-    participants: List[str],
-    rate_up_mbps: float,
-    rate_down_mbps: float
-) -> Dict[Tuple[str, str], float]:
-    P = set(participants)
-    parent = {root: None}
-    order = [root]
-    for u in order:
-        for v in T.neighbors(u):
-            if v in parent: continue
-            parent[v] = u
-            order.append(v)
+    *,
+    weight: str = "weight",
+    tau_pct: float = 0.03,   # 至少改善 3%（相對於「被移除邊」或整體）
+    max_iter: int = 64
+) -> Tuple[nx.Graph, List[SwapLog]]:
+    """
+    嘗試以單一非樹邊 e' 取代樹上的某一邊 e（位於同一環上），若 w(e') < w(e)*(1-τ) 則替換。
+    以避免抖動，要求明顯改善。
+    """
+    T = T.copy()
+    logs: List[SwapLog] = []
 
-    cnt = {n: (1 if n in P else 0) for n in T.nodes}
-    for n in reversed(order):
-        p = parent[n]
-        if p is not None:
-            cnt[p] = cnt.get(p, 0) + cnt.get(n, 0)
+    def edge_w(u, v): return float(G[u][v].get(weight, 1.0))
 
-    loads: Dict[Tuple[str, str], float] = {}
-    for n in T.nodes:
-        p = parent.get(n)
-        if p is None: continue
-        ekey = tuple(sorted((n, p)))
-        subtree_count = cnt[n]
-        loads[ekey] = float(subtree_count) * (float(rate_up_mbps) + float(rate_down_mbps))
-    return loads
+    it = 0
+    improved = True
+    while improved and it < max_iter:
+        it += 1
+        improved = False
+        total_before = steiner_tree_cost(G, T, weight=weight)
 
+        # 嘗試所有非樹邊
+        for u, v in G.edges:
+            if T.has_edge(u, v):
+                continue
+            # 加入形成唯一環
+            T.add_edge(u, v)
+            try:
+                cycle = nx.find_cycle(T, source=u)
+            except nx.NetworkXNoCycle:
+                T.remove_edge(u, v)
+                continue
 
-# ------------------------------
-# Admission（初次 / 增量）
-# ------------------------------
-def _admit_edges_demands(
-    cls: str,
-    demands: Dict[Tuple[str,str], float],
-    reserved,
-    usage
-) -> Tuple[bool, List[Tuple[str,str]]]:
-    if admit_edge is None or release_edge is None:
-        raise RuntimeError("admit_edge/release_edge 未可用；請在 models/queues 中匯出後再使用。")
+            # 在環上尋找可以移除的「最貴」樹邊（但不可是剛加的 e'）
+            cyc_edges = [(a, b) for (a, b) in cycle]
+            candidate_drop = None
+            drop_w = -1.0
+            for a, b in cyc_edges:
+                if (a == u and b == v) or (a == v and b == u):
+                    continue
+                w_ab = edge_w(a, b)
+                if w_ab > drop_w:
+                    drop_w = w_ab
+                    candidate_drop = (a, b)
 
-    taken: List[Tuple[str,str]] = []
-    pool = "AF" if norm_class and norm_class(cls).startswith("AF") else (norm_class(cls) if norm_class else cls)
-    for e, need in demands.items():
-        if need <= 0:
-            continue
-        ok = admit_edge(e, pool, float(need), reserved, usage)
-        if not ok:
-            for ek in taken:
-                release_edge(ek, pool, float(demands.get(ek, 0.0)), reserved, usage)
-            return False, taken
-        taken.append(e)
-    return True, taken
+            if candidate_drop is not None:
+                add_w = edge_w(u, v)
+                # 改善條件：新邊顯著比舊邊便宜
+                if add_w < drop_w * (1.0 - tau_pct) - 1e-12:
+                    # 接受替換
+                    T.remove_edge(*candidate_drop)
+                    new_total = steiner_tree_cost(G, T, weight=weight)
+                    delta = total_before - new_total
+                    logs.append(SwapLog(add_edge=_edge_key(u, v),
+                                        drop_edge=_edge_key(*candidate_drop),
+                                        delta_cost=max(0.0, delta),
+                                        new_total=new_total))
+                    improved = True
+                else:
+                    # 還原
+                    T.remove_edge(u, v)
+            else:
+                T.remove_edge(u, v)
 
-def _release_edges_demands(cls: str, demands: Dict[Tuple[str,str], float], reserved, usage):
-    if release_edge is None:
-        return
-    pool = "AF" if norm_class and norm_class(cls).startswith("AF") else (norm_class(cls) if norm_class else cls)
-    for e, need in demands.items():
-        if need > 0:
-            release_edge(e, pool, float(need), reserved, usage)
-
-def admit_tree_bidir_initial(
-    T: nx.Graph,
-    cls: str,
-    root: str,
-    participants: List[str],
-    rate_up_mbps: float,
-    rate_down_mbps: float,
-    reserved,
-    usage
-) -> Tuple[bool, Dict[Tuple[str,str], float]]:
-    loads = tree_edge_loads_bidir(T, root, participants, rate_up_mbps, rate_down_mbps)
-    ok, taken = _admit_edges_demands(cls, loads, reserved, usage)
-    if not ok:
-        return False, loads
-    return True, loads
-
-def admit_tree_bidir_incremental(
-    T_old: nx.Graph,
-    loads_old: Dict[str, float],  # {"u-v": Mbps}
-    T_new: nx.Graph,
-    cls: str,
-    root: str,
-    participants: List[str],
-    rate_up_mbps: float,
-    rate_down_mbps: float,
-    reserved,
-    usage
-) -> Tuple[bool, Dict[Tuple[str,str], float], Dict[Tuple[str,str], float], Dict[Tuple[str,str], float]]:
-
-    loads_old_t: Dict[Tuple[str,str], float] = {}
-    for k, v in (loads_old or {}).items():
-        a, b = k.split("-", 1)
-        ekey = tuple(sorted((a, b)))
-        loads_old_t[ekey] = float(v)
-
-    loads_new_t = tree_edge_loads_bidir(T_new, root, participants, rate_up_mbps, rate_down_mbps)
-
-    edges = set(list(T_new.edges()))
-    edges |= set(loads_old_t.keys())
-
-    delta_pos: Dict[Tuple[str,str], float] = {}
-    delta_neg: Dict[Tuple[str,str], float] = {}
-
-    for e in edges:
-        newv = float(loads_new_t.get(e, 0.0))
-        oldv = float(loads_old_t.get(e, 0.0))
-        if newv > oldv:
-            delta_pos[e] = newv - oldv
-        elif oldv > newv:
-            delta_neg[e] = oldv - newv
-
-    ok, taken = _admit_edges_demands(cls, delta_pos, reserved, usage)
-    if not ok:
-        return False, loads_new_t, delta_pos, delta_neg
-
-    _release_edges_demands(cls, delta_neg, reserved, usage)
-    return True, loads_new_t, delta_pos, delta_neg
-
+        # 可能經過一輪仍無改善
+    _prune_leaves(T, set(T.nodes))  # 只會修剪非終端葉；終端集合在外層控制
+    return T, logs
 
 # ------------------------------
-# Pinned Tree：序列化/還原
+# 6) Admission（雙向 SFU 模型；可選）
 # ------------------------------
+
 def tree_edges_list(T: nx.Graph) -> List[Tuple[str,str]]:
-    return [tuple(sorted(e)) for e in T.edges]
+    return [_edge_key(u, v) for u, v in T.edges]
 
 def tree_from_edges(edges: Iterable[Tuple[str,str]]) -> nx.Graph:
     T = nx.Graph()
     for u, v in edges:
         T.add_edge(u, v)
     return T
+
+# ------------------------------
+# 7) I/O & CLI：讀 flows，為每個多播流建樹並輸出 CSV
+# ------------------------------
+
+def read_edges_graph(edges_csv: Path, weight: str = "weight") -> nx.Graph:
+    G = nx.Graph()
+    with edges_csv.open(newline="", encoding="utf-8") as f:
+        for row in csv.DictReader(f):
+            u = row["src_switch"].strip()
+            v = row["dst_switch"].strip()
+            w = float(row.get("weight", 1.0))
+            G.add_edge(u, v, weight=w)
+    return G
+
+def read_flows(flows_csv: Path) -> List[dict]:
+    flows = []
+    with flows_csv.open(newline="", encoding="utf-8") as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            if not row: 
+                continue
+            flows.append(row)
+    return flows
+
+def parse_subs(s: str) -> List[str]:
+    s = (s or "").strip()
+    if not s:
+        return []
+    return [x.strip() for x in s.replace(";", ",").split(",") if x.strip()]
+
+def build_tree_for_flow(
+    G: nx.Graph,
+    pub: str,
+    subs: List[str],
+    *,
+    method: str = "mst",
+    weight: str = "weight",
+    swap_pct: float = 0.03,
+    swap_iter: int = 64
+) -> Tuple[nx.Graph, List[SwapLog]]:
+    terminals = [pub] + [x for x in subs if x != pub]
+    if method == "greedy":
+        T = steiner_extend_greedy(G, terminals, weight=weight)
+    elif method == "hybrid":
+        # 先 MST，再以 greedy 的方式（其實已隱含在 swaps）做補強
+        T = steiner_tree_mst(G, terminals, weight=weight)
+    else:  # "mst"
+        T = steiner_tree_mst(G, terminals, weight=weight)
+
+    # 邊替換（local swap）
+    T2, logs = local_edge_swaps(G, T, weight=weight, tau_pct=swap_pct, max_iter=swap_iter)
+    # 修剪非終端葉
+    _prune_leaves(T2, set(terminals))
+    return T2, logs
+
+def build_cli() -> argparse.ArgumentParser:
+    ap = argparse.ArgumentParser(description="Steiner tree (MST / Greedy attach) for Pub/Sub multicast")
+    ap.add_argument("--edges", type=str, required=True, help="outputs/matrix/edges_all.csv")
+    ap.add_argument("--flows", type=str, required=True, help="configs/flows.csv（需含 subs）")
+    ap.add_argument("--out-trees", type=str, default="outputs/flows/trees.csv")
+    ap.add_argument("--out-reroutes", type=str, default="outputs/flows/reroutes.csv")
+    ap.add_argument("--weight", type=str, default="weight", help="邊權重欄位（預設 weight）")
+    ap.add_argument("--mode", choices=["mst","greedy","hybrid"], default="mst", help="建樹策略")
+    ap.add_argument("--swap-pct", type=float, default=0.03, help="local swap 改善門檻（百分比）")
+    ap.add_argument("--swap-iters", type=int, default=64, help="local swap 最多迭代次數")
+    return ap
+
+def main() -> None:
+    args = build_cli().parse_args()
+    edges_csv = Path(args.edges)
+    flows_csv = Path(args.flows)
+    out_trees = Path(args.out_trees); out_trees.parent.mkdir(parents=True, exist_ok=True)
+    out_rr    = Path(args.out_reroutes); out_rr.parent.mkdir(parents=True, exist_ok=True)
+
+    G = read_edges_graph(edges_csv, weight=args.weight)
+    flows = read_flows(flows_csv)
+
+    # trees.csv
+    with out_trees.open("w", newline="", encoding="utf-8") as ft, out_rr.open("w", newline="", encoding="utf-8") as fr:
+        wt = csv.writer(ft)
+        wr = csv.writer(fr)
+        wt.writerow(["flow_id","method","pub","subs","num_edges","total_cost","edge_list","swap_count"])
+        wr.writerow(["flow_id","step","add_edge","drop_edge","delta_cost","new_total_cost"])
+
+        for row in flows:
+            fid  = (row.get("id") or "").strip() or f"flow{len(row)}"
+            pub  = (row.get("src") or "").strip()
+            topic= (row.get("topic") or "").strip()
+            subs = parse_subs(row.get("subs"))
+
+            # 非多播流（或 subs 為空）就跳過
+            if not subs:
+                continue
+            terms = [pub] + subs
+
+            T, logs = build_tree_for_flow(
+                G, pub, subs,
+                method=args.mode,
+                weight=args.weight,
+                swap_pct=float(args.swap_pct),
+                swap_iter=int(args.swap_iters)
+            )
+            # 統計
+            cost = steiner_tree_cost(G, T, weight=args.weight)
+            edges_ser = ";".join(f"{u}-{v}" for u, v in sorted(tree_edges_list(T)))
+            wt.writerow([fid, args.mode, pub, ";".join(subs), T.number_of_edges(), f"{cost:.6f}", edges_ser, len(logs)])
+
+            for i, ev in enumerate(logs, 1):
+                wr.writerow([
+                    fid,
+                    i,
+                    f"{ev.add_edge[0]}-{ev.add_edge[1]}",
+                    f"{ev.drop_edge[0]}-{ev.drop_edge[1]}",
+                    f"{ev.delta_cost:.6f}",
+                    f"{ev.new_total:.6f}",
+                ])
+
+    print(f"[OK] trees written   -> {out_trees}")
+    print(f"[OK] reroutes written-> {out_rr}")
+
+
+if __name__ == "__main__":
+    main()

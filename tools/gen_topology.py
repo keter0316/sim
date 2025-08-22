@@ -2,25 +2,23 @@
 # -*- coding: utf-8 -*-
 
 """
+參數化拓撲產生器
 
-python tools/gen_topology.py --switches 10 --hosts 8 --access-k 1 --core-mode ring --uplinks 2
-
-
-參數化拓撲產生器（外圍 H 台 access switches ↔ H 台 hosts 一對一 其餘為 core :
-
+外圍 H 台 access switches ↔ H 台 hosts（1:1），其餘為 core：
 - 總 switch = N 命名 s1..sN
-- 外圍 access switches = s1..sH 且 h1..hH 各自對接 s1..sH 嚴格 1:1
-- 內部 core switches = s(H+1)..sN
+- 外圍 access = s1..sH，h1..hH 各自對接 s1..sH
+- 內部 core   = s(H+1)..sN
 - Access 之間可用 k-近鄰環 (k=0 不互連）
-- Access → Core 可設 uplinks=1 或 2( 輪詢分配到 core )
-- Core 內部可選 ring / clique / ws
+- Access → Core uplinks=1 或 2（輪詢分配到 core）
+- Core 拓撲：ring / clique / ws（小世界）
 
 輸出：
-- outputs/topo_diagram/topo_auto.png
-- outputs/matrix/adjacency_switches.csv   （只含「所有 switch」的鄰接矩陣 含 access 與 core)
-- outputs/matrix/edges_all.csv            （全網邊；欄位: src_switch,dst_switch,weight,bw_mbps,type)
+- {out}/topo_diagram/topo_auto.png
+- {out}/matrix/adjacency_switches.csv      （只含所有 switch 的鄰接矩陣）
+- {out}/matrix/edges_all.csv               （全網邊；欄位: src_switch,dst_switch,weight,bw_mbps,type,delay_ms,loss,etx,rssi,snr）
+- {out}/matrix/nodes.csv                   （node_id, role）
 
-注意：所有邊的 bw_mbps 預設均為 10000。
+注意：所有邊的 bw_mbps 預設均為 10000（可調）。
 """
 
 from __future__ import annotations
@@ -58,8 +56,42 @@ def build_parser() -> argparse.ArgumentParser:
     # Link 參數（全部預設 10000）
     ap.add_argument("--bw-access", type=float, default=10_000.0, help="Access/Host/Access-Core 預設頻寬 (Mbps)")
     ap.add_argument("--bw-core",   type=float, default=10_000.0, help="Core-Core 預設頻寬 (Mbps)")
-    ap.add_argument("--weight",    type=float, default=1.0, help="路徑計算權重（預設 1.0）")
+    ap.add_argument("--weight",    type=float, default=1.0,      help="路徑計算權重（預設 1.0）")
+
+    # 新增：seed / out 目錄 / 是否輸出無線指標
+    ap.add_argument("--seed",      type=int,   default=1,        help="隨機種子（重現用）")
+    ap.add_argument("--out-dir",   type=str,   default="outputs",help="輸出根目錄（預設 outputs）")
+    ap.add_argument("--radio",     action="store_true",          help="為 access/host 相關鏈路產生 ETX/RSSI/SNR")
     return ap
+
+
+# ------------------------- Metrics sampler -------------------------
+
+# 預設延遲範圍（毫秒）
+DELAY_MS = {
+    "host-access":  (0.3, 0.7),
+    "access-access":(0.7, 1.2),
+    "access-core":  (0.8, 1.5),
+    "core-core":    (0.5, 1.0),
+}
+
+def sample_link_metrics(edge_type: str, rng: np.random.Generator, emit_radio: bool):
+    lo, hi = DELAY_MS.get(edge_type, (0.8, 1.5))
+    delay_ms = float(rng.uniform(lo, hi))
+    # 丟包維持極低（可視為基線/雜訊）
+    loss = float(max(0.0, rng.normal(0.0001, 0.0001)))
+
+    if emit_radio and edge_type in ("host-access", "access-access", "access-core"):
+        etx  = float(max(1.0, rng.normal(1.05, 0.05)))
+        # 粗略給個型態感（可再調）：
+        base_rssi = {"host-access": -58, "access-access": -65, "access-core": -62}[edge_type]
+        base_snr  = {"host-access":  25, "access-access":  20, "access-core":  22}[edge_type]
+        rssi = float(rng.normal(base_rssi, 4.0))
+        snr  = float(rng.normal(base_snr,  3.0))
+    else:
+        etx, rssi, snr = (np.nan, np.nan, np.nan)
+
+    return dict(delay_ms=delay_ms, loss=loss, etx=etx, rssi=rssi, snr=snr)
 
 
 # ------------------------- Topology builders -------------------------
@@ -73,7 +105,8 @@ def build_names(N: int, H: int) -> tuple[list[str], list[str], list[str]]:
 
 
 def add_access_and_hosts(G: nx.Graph, access_sw: List[str], H: int,
-                         k: int, bw_access: float, weight: float) -> List[str]:
+                         k: int, bw_access: float, weight: float,
+                         rng: np.random.Generator, emit_radio: bool) -> List[str]:
     """建立外圍 access switches 與 hosts（h1..hH），加上 access 間近鄰環與 host 對接。"""
     # 標記 access switches
     G.add_nodes_from(access_sw, ntype="access")
@@ -83,7 +116,9 @@ def add_access_and_hosts(G: nx.Graph, access_sw: List[str], H: int,
     # host 一對一對接 access：hᵢ ↔ sᵢ
     for i in range(H):
         h, s = hosts[i], access_sw[i]
-        G.add_edge(h, s, type="host-access", bw_mbps=bw_access, weight=weight)
+        G.add_edge(h, s,
+                   type="host-access", bw_mbps=bw_access, weight=weight,
+                   **sample_link_metrics("host-access", rng, emit_radio))
     # access 間 k-近鄰環
     A = len(access_sw)
     if k > 0 and A >= 2:
@@ -92,12 +127,15 @@ def add_access_and_hosts(G: nx.Graph, access_sw: List[str], H: int,
             for d in range(1, k+1):
                 v = access_sw[(i + d) % A]
                 if not G.has_edge(u, v):
-                    G.add_edge(u, v, type="access-access", bw_mbps=bw_access, weight=weight)
+                    G.add_edge(u, v,
+                               type="access-access", bw_mbps=bw_access, weight=weight,
+                               **sample_link_metrics("access-access", rng, emit_radio))
     return hosts
 
 
 def add_core_layer(G: nx.Graph, cores: List[str], mode: str, core_k: int,
-                   rewire_p: float, bw_core: float, weight: float):
+                   rewire_p: float, bw_core: float, weight: float,
+                   rng: np.random.Generator, emit_radio: bool):
     """在 core 節點之間建立連線（ring/clique/ws）。"""
     if not cores:
         return
@@ -110,16 +148,21 @@ def add_core_layer(G: nx.Graph, cores: List[str], mode: str, core_k: int,
         for i in range(C):
             u, v = cores[i], cores[(i+1) % C]
             if not G.has_edge(u, v):
-                G.add_edge(u, v, type="core-core", bw_mbps=bw_core, weight=weight)
+                G.add_edge(u, v,
+                           type="core-core", bw_mbps=bw_core, weight=weight,
+                           **sample_link_metrics("core-core", rng, emit_radio))
         # 補鄰近 d=2..k/2
         for d in range(2, (k//2)+1):
             for i in range(C):
                 u, v = cores[i], cores[(i + d) % C]
                 if not G.has_edge(u, v):
-                    G.add_edge(u, v, type="core-core", bw_mbps=bw_core, weight=weight)
+                    G.add_edge(u, v,
+                               type="core-core", bw_mbps=bw_core, weight=weight,
+                               **sample_link_metrics("core-core", rng, emit_radio))
         # 小世界重接
         if mode == "ws" and C >= 4 and rewire_p > 0:
-            rng = np.random.default_rng(42)
+            edges = [(u, v) for u, v, data in G.edges(cores, data=True) if d.get("type") == "core-core"]
+            # 上面一行用 d 會衝到外層；更穩妥寫法如下：
             edges = [(u, v) for u, v, data in G.edges(cores, data=True) if data.get("type") == "core-core"]
             for (u, v) in list(edges):
                 if not G.has_edge(u, v):
@@ -129,12 +172,17 @@ def add_core_layer(G: nx.Graph, cores: List[str], mode: str, core_k: int,
                     candidates = [x for x in cores if x != u and not G.has_edge(u, x)]
                     if candidates:
                         w = rng.choice(candidates)
-                        G.add_edge(u, w, type="core-core", bw_mbps=bw_core, weight=weight)
+                        G.add_edge(u, w,
+                                   type="core-core", bw_mbps=bw_core, weight=weight,
+                                   **sample_link_metrics("core-core", rng, emit_radio))
 
     elif mode == "clique":
         for i in range(C):
             for j in range(i+1, C):
-                G.add_edge(cores[i], cores[j], type="core-core", bw_mbps=bw_core, weight=weight)
+                if not G.has_edge(cores[i], cores[j]):
+                    G.add_edge(cores[i], cores[j],
+                               type="core-core", bw_mbps=bw_core, weight=weight,
+                               **sample_link_metrics("core-core", rng, emit_radio))
 
     elif mode == "none":
         pass
@@ -143,7 +191,8 @@ def add_core_layer(G: nx.Graph, cores: List[str], mode: str, core_k: int,
 
 
 def add_uplinks(G: nx.Graph, access_sw: List[str], core_sw: List[str],
-                uplinks: int, bw_access: float, weight: float):
+                uplinks: int, bw_access: float, weight: float,
+                rng: np.random.Generator, emit_radio: bool):
     """Access → Core 上行連線（核心存在時才做）。"""
     if not core_sw or not access_sw or uplinks <= 0:
         return
@@ -151,13 +200,19 @@ def add_uplinks(G: nx.Graph, access_sw: List[str], core_sw: List[str],
     for i, s in enumerate(access_sw):
         if uplinks == 1:
             c = core_sw[i % C]
-            G.add_edge(s, c, type="access-core", bw_mbps=bw_access, weight=weight)
+            G.add_edge(s, c,
+                       type="access-core", bw_mbps=bw_access, weight=weight,
+                       **sample_link_metrics("access-core", rng, emit_radio))
         else:  # uplinks == 2
             c1 = core_sw[i % C]
             c2 = core_sw[(i + (C//2 or 1)) % C] if C > 1 else c1
-            G.add_edge(s, c1, type="access-core", bw_mbps=bw_access, weight=weight)
+            G.add_edge(s, c1,
+                       type="access-core", bw_mbps=bw_access, weight=weight,
+                       **sample_link_metrics("access-core", rng, emit_radio))
             if c2 != c1:
-                G.add_edge(s, c2, type="access-core", bw_mbps=bw_access, weight=weight)
+                G.add_edge(s, c2,
+                           type="access-core", bw_mbps=bw_access, weight=weight,
+                           **sample_link_metrics("access-core", rng, emit_radio))
 
 
 # ------------------------- Layout & Export -------------------------
@@ -180,10 +235,11 @@ def layout_positions(access_sw: List[str], hosts: List[str], core_sw: List[str])
     return pos
 
 
-def export_outputs(G: nx.Graph, all_sw: List[str], core_sw: List[str]):
+def export_outputs(G: nx.Graph, all_sw: List[str], core_sw: List[str], out_dir: str):
     # 目錄
-    img_dir = Path("outputs/topo_diagram"); img_dir.mkdir(parents=True, exist_ok=True)
-    mat_dir = Path("outputs/matrix");       mat_dir.mkdir(parents=True, exist_ok=True)
+    root = Path(out_dir)
+    img_dir = root / "topo_diagram"; img_dir.mkdir(parents=True, exist_ok=True)
+    mat_dir = root / "matrix";       mat_dir.mkdir(parents=True, exist_ok=True)
 
     access_sw = [n for n, d in G.nodes(data=True) if d.get("ntype") == "access"]
     host_nodes = [n for n, d in G.nodes(data=True) if d.get("ntype") == "host"]
@@ -212,29 +268,51 @@ def export_outputs(G: nx.Graph, all_sw: List[str], core_sw: List[str]):
     plt.savefig(fig_path, bbox_inches="tight", dpi=160)
     plt.close()
 
-    # ✅ 鄰接矩陣：改為「所有 switch（access + core）」之間
-    # 依 s1..sN 固定順序輸出
+    # 鄰接矩陣（所有 switch）
     SG = G.subgraph(all_sw).copy()
     A = nx.to_numpy_array(SG, nodelist=all_sw, dtype=int)
     pd.DataFrame(A, index=all_sw, columns=all_sw).to_csv(mat_dir / "adjacency_switches.csv")
 
-    # 全網 edges.csv（bw_mbps 預設統一為 10000，已由 CLI 預設）
+    # 全網 edges.csv（擴充欄位）
     edges_csv = mat_dir / "edges_all.csv"
     with edges_csv.open("w", newline="", encoding="utf-8") as f:
         w = csv.writer(f)
-        w.writerow(["src_switch","dst_switch","weight","bw_mbps","type"])
+        w.writerow(["src_switch","dst_switch","weight","bw_mbps","type",
+                    "delay_ms","loss","etx","rssi","snr"])
         for u, v, d in G.edges(data=True):
-            w.writerow([u, v, d.get("weight", 1.0), d.get("bw_mbps", 10_000.0), d.get("type","")])
+            w.writerow([
+                u, v,
+                d.get("weight", 1.0),
+                d.get("bw_mbps", 10_000.0),
+                d.get("type",""),
+                d.get("delay_ms",""),
+                d.get("loss",""),
+                d.get("etx",""),
+                d.get("rssi",""),
+                d.get("snr",""),
+            ])
+
+    # 節點角色表
+    nodes_csv = mat_dir / "nodes.csv"
+    with nodes_csv.open("w", newline="", encoding="utf-8") as f:
+        w = csv.writer(f)
+        w.writerow(["node_id","role"])
+        for n, d in G.nodes(data=True):
+            role = d.get("ntype", ("switch" if n.startswith("s") else "host"))
+            w.writerow([n, role])
 
     print(f"[OK] topology image     -> {fig_path}")
     print(f"[OK] adjacency (switch) -> {mat_dir / 'adjacency_switches.csv'}")
     print(f"[OK] edges csv          -> {edges_csv}")
+    print(f"[OK] nodes csv          -> {nodes_csv}")
 
 
 # ------------------------- Main -------------------------
 
 def main():
     args = build_parser().parse_args()
+    rng = np.random.default_rng(args.seed)
+
     N = max(1, args.switches)
     H = max(0, min(args.hosts, N))   # 0 <= H <= N
 
@@ -244,10 +322,11 @@ def main():
     G = nx.Graph()
 
     # 外圍：access switches + hosts（嚴格 hᵢ ↔ sᵢ）
-    hosts = add_access_and_hosts(
+    _hosts = add_access_and_hosts(
         G, access_sw, H,
         k=max(0, args.access_k),
-        bw_access=args.bw_access, weight=args.weight
+        bw_access=args.bw_access, weight=args.weight,
+        rng=rng, emit_radio=args.radio
     )
 
     # 內部：core switches 連線
@@ -255,16 +334,18 @@ def main():
         G, core_sw,
         mode=("none" if not core_sw else args.core_mode),
         core_k=args.core_k, rewire_p=args.core_rewire,
-        bw_core=args.bw_core, weight=args.weight
+        bw_core=args.bw_core, weight=args.weight,
+        rng=rng, emit_radio=args.radio
     )
 
     # Access → Core uplinks
     add_uplinks(
         G, access_sw, core_sw,
-        uplinks=args.uplinks, bw_access=args.bw_access, weight=args.weight
+        uplinks=args.uplinks, bw_access=args.bw_access, weight=args.weight,
+        rng=rng, emit_radio=args.radio
     )
 
-    export_outputs(G, all_sw, core_sw)
+    export_outputs(G, all_sw, core_sw, out_dir=args.out_dir)
 
 
 if __name__ == "__main__":
