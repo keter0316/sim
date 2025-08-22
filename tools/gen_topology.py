@@ -24,7 +24,7 @@
 from __future__ import annotations
 import argparse, csv
 from pathlib import Path
-from typing import List, Tuple
+from typing import List
 
 import networkx as nx
 import matplotlib.pyplot as plt
@@ -108,11 +108,12 @@ def add_access_and_hosts(G: nx.Graph, access_sw: List[str], H: int,
                          k: int, bw_access: float, weight: float,
                          rng: np.random.Generator, emit_radio: bool) -> List[str]:
     """建立外圍 access switches 與 hosts（h1..hH），加上 access 間近鄰環與 host 對接。"""
-    # 標記 access switches
-    G.add_nodes_from(access_sw, ntype="access")
+    # 標記 access switches（同步設定 role 與相容欄位 ntype）
+    G.add_nodes_from((s, {"role": "access", "ntype": "access"}) for s in access_sw)
     # 建 host
     hosts = [f"h{i}" for i in range(1, H+1)]
-    G.add_nodes_from(hosts, ntype="host")
+    G.add_nodes_from((h, {"role": "host", "ntype": "host"}) for h in hosts)
+
     # host 一對一對接 access：hᵢ ↔ sᵢ
     for i in range(H):
         h, s = hosts[i], access_sw[i]
@@ -139,7 +140,8 @@ def add_core_layer(G: nx.Graph, cores: List[str], mode: str, core_k: int,
     """在 core 節點之間建立連線（ring/clique/ws）。"""
     if not cores:
         return
-    G.add_nodes_from(cores, ntype="core")
+    # 標記 core 節點（同步設定 role 與相容欄位 ntype）
+    G.add_nodes_from((c, {"role": "core", "ntype": "core"}) for c in cores)
 
     C = len(cores)
     if mode in ("ring","ws"):
@@ -161,8 +163,6 @@ def add_core_layer(G: nx.Graph, cores: List[str], mode: str, core_k: int,
                                **sample_link_metrics("core-core", rng, emit_radio))
         # 小世界重接
         if mode == "ws" and C >= 4 and rewire_p > 0:
-            edges = [(u, v) for u, v, data in G.edges(cores, data=True) if d.get("type") == "core-core"]
-            # 上面一行用 d 會衝到外層；更穩妥寫法如下：
             edges = [(u, v) for u, v, data in G.edges(cores, data=True) if data.get("type") == "core-core"]
             for (u, v) in list(edges):
                 if not G.has_edge(u, v):
@@ -241,9 +241,15 @@ def export_outputs(G: nx.Graph, all_sw: List[str], core_sw: List[str], out_dir: 
     img_dir = root / "topo_diagram"; img_dir.mkdir(parents=True, exist_ok=True)
     mat_dir = root / "matrix";       mat_dir.mkdir(parents=True, exist_ok=True)
 
-    access_sw = [n for n, d in G.nodes(data=True) if d.get("ntype") == "access"]
-    host_nodes = [n for n, d in G.nodes(data=True) if d.get("ntype") == "host"]
-    pos = layout_positions(access_sw, host_nodes, core_sw)
+    # 以 role 為主（相容 ntype）
+    def nodes_with(role: str) -> List[str]:
+        return [n for n, d in G.nodes(data=True) if d.get("role") == role or d.get("ntype") == role]
+
+    access_nodes = nodes_with("access")
+    host_nodes   = nodes_with("host")
+    core_nodes   = nodes_with("core")
+
+    pos = layout_positions(access_nodes, host_nodes, core_sw)
 
     # 畫圖
     plt.figure(figsize=(8.5, 8.5))
@@ -256,12 +262,12 @@ def export_outputs(G: nx.Graph, all_sw: List[str], core_sw: List[str], out_dir: 
     draw_edges("core-core", 2.6)
     draw_edges("host-access", 1.2)
 
-    if access_sw:
-        nx.draw_networkx_nodes(G, pos, nodelist=access_sw, node_size=650)
+    if access_nodes:
+        nx.draw_networkx_nodes(G, pos, nodelist=access_nodes, node_size=650)
     if host_nodes:
         nx.draw_networkx_nodes(G, pos, nodelist=host_nodes, node_size=420)
-    if core_sw:
-        nx.draw_networkx_nodes(G, pos, nodelist=core_sw, node_size=720)
+    if core_nodes:
+        nx.draw_networkx_nodes(G, pos, nodelist=core_nodes, node_size=720)
     nx.draw_networkx_labels(G, pos, font_size=9)
     plt.axis("off")
     fig_path = img_dir / "topo_auto.png"
@@ -292,13 +298,23 @@ def export_outputs(G: nx.Graph, all_sw: List[str], core_sw: List[str], out_dir: 
                 d.get("snr",""),
             ])
 
-    # 節點角色表
+    # 節點角色表（以 role 為主；若無則回退 ntype；仍缺則以名稱推斷）
     nodes_csv = mat_dir / "nodes.csv"
     with nodes_csv.open("w", newline="", encoding="utf-8") as f:
         w = csv.writer(f)
         w.writerow(["node_id","role"])
-        for n, d in G.nodes(data=True):
-            role = d.get("ntype", ("switch" if n.startswith("s") else "host"))
+        for n in sorted(G.nodes, key=str):
+            d = G.nodes[n]
+            role = d.get("role") or d.get("ntype")
+            if not role:
+                if str(n).startswith("h"):
+                    role = "host"
+                elif str(n).startswith("s"):
+                    # 盡量推斷：若連到 host 視為 access，否則 core
+                    neigh = list(G.neighbors(n))
+                    role = "access" if any(str(x).startswith("h") for x in neigh) else "core"
+                else:
+                    role = "other"
             w.writerow([n, role])
 
     print(f"[OK] topology image     -> {fig_path}")

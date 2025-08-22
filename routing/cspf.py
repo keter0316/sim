@@ -11,7 +11,6 @@ from typing import Dict, List, Optional, Tuple
 import networkx as nx
 import yaml
 
-
 # 可選：使用既有的 Yen KSP；不存在時退化為只找最短一路
 try:
     from routing.ksp_additional import yen_ksp
@@ -81,7 +80,7 @@ def compute_reserve_per_edge(bw_mbps: float, reservations_cfg: dict) -> Dict[str
     return out
 
 
-# ------------------------- Cost / Admission -------------------------
+# ------------------------- Cost / SLA -------------------------
 
 def edge_cost(
     e_data: dict,
@@ -114,15 +113,17 @@ def edge_cost(
     )
 
 
-def path_sla_ok(
+def eval_path_sla(
     G: nx.Graph,
     path: List[str],
     cls_params: ClassParams,
-) -> bool:
+) -> Tuple[bool, float, float, str]:
+    """
+    回傳 (ok, sum_delay_ms, sum_loss, reason)
+    reason 例如："" 或 "delay>30.0(45.2);loss>0.001(0.004)"
+    """
     if not path or len(path) < 2:
-        return True
-    if cls_params.maxDelay_ms is None and cls_params.maxLoss is None:
-        return True
+        return True, 0.0, 0.0, ""
     total_delay = 0.0
     total_loss = 0.0
     for i in range(len(path) - 1):
@@ -130,11 +131,13 @@ def path_sla_ok(
         d = G[u][v]
         total_delay += float(d.get("delay_ms", 1.0))
         total_loss  += float(d.get("loss", 0.0))
+    reasons: List[str] = []
     if cls_params.maxDelay_ms is not None and total_delay > cls_params.maxDelay_ms:
-        return False
+        reasons.append(f"delay>{cls_params.maxDelay_ms:.3f}({total_delay:.3f})")
     if cls_params.maxLoss is not None and total_loss > cls_params.maxLoss:
-        return False
-    return True
+        reasons.append(f"loss>{cls_params.maxLoss:.6f}({total_loss:.6f})")
+    ok = (len(reasons) == 0)
+    return ok, total_delay, total_loss, ";".join(reasons)
 
 
 # ------------------------- Main CSPF selection per flow -------------------------
@@ -151,72 +154,77 @@ def cspf_pick_path(
     theta: float = 0.05,  # Δcost ≤ 5% 視為等價
     tau: float = 1.0,     # WECMP softmax 溫度
     K: int = 8,           # 取前 K 最短候選
-) -> Tuple[List[str], float, List[List[str]], List[float]]:
+):
     """
-    在「可行邊」上計算對應 class 的成本，回傳：
-      (best_path, best_cost, wecmp_paths, wecmp_weights)
-    wecmp_paths 只保留 Δcost ≤ theta 的候選；權重為 softmax(exp(-tau*cost))
+    回傳一個函式 pick_for_pair(src, dst)：
+      -> (best_path, best_cost, wecmp_paths, wecmp_weights, filtered_sla_info)
+
+    filtered_sla_info：List[str]，每筆形如
+      "h1->s1->s9->s10->s2->h2|delay=12.300|loss=0.000200|viol=delay>30.000(45.200)"
     """
-    # 1) 構造可行子圖（Admission 硬限制）
+    # 1) 構造可行子圖（Admission 硬限制）並計算邊成本
     H = nx.Graph()
     for u, v, d in G_base.edges(data=True):
         ek = (u, v) if u <= v else (v, u)
         cap = float(reserved.get(ek, {}).get(cls, 0.0))
         use = float(usage.get(ek, {}).get(cls, 0.0))
-        # Admission：usage + rate ≤ cap*(1-headroom)
         feasible = (cap * (1.0 - headroom) - use) >= rate_mbps - 1e-9
         if not feasible:
             continue
-        # 2) 邊成本
         cost = edge_cost(d, cls, use, cap, cls_params)
-        H.add_edge(u, v, cspf_cost=cost, delay_ms=d.get("delay_ms", 1.0), loss=d.get("loss", 0.0))
+        H.add_edge(
+            u, v,
+            cspf_cost=cost,
+            delay_ms=d.get("delay_ms", 1.0),
+            loss=d.get("loss", 0.0),
+        )
 
-    # 3) Dijkstra（最短成本路）
-    try:
-        # 先用未指定 src/dst 的情境；呼叫者會指定
-        pass
-    except Exception:
-        pass  # placeholder，實際選路在 pick_for_pair 內進行
-
-    # 由於 src/dst 會因 flow 而異，實際計算放在內部 helper
-    def pick_for_pair(src: str, dst: str) -> Tuple[List[str], float, List[List[str]], List[float]]:
+    def pick_for_pair(src: str, dst: str) -> Tuple[List[str], float, List[List[str]], List[float], List[str]]:
         if src not in H or dst not in H:
-            return [], math.inf, [], []
+            return [], math.inf, [], [], []
 
         try:
             P_best = nx.shortest_path(H, src, dst, weight="cspf_cost")
         except nx.NetworkXNoPath:
-            return [], math.inf, [], []
+            return [], math.inf, [], [], []
 
         best_cost = sum(H[P_best[i]][P_best[i+1]]["cspf_cost"] for i in range(len(P_best)-1))
-        if not path_sla_ok(H, P_best, cls_params):
-            return [], math.inf, [], []
+        ok_best, _, _, reason_best = eval_path_sla(H, P_best, cls_params)
+        if not ok_best:
+            # 連最佳成本路徑也不合 SLA，視為無可用路徑
+            return [], math.inf, [], [], [f"{'->'.join(P_best)}|viol={reason_best}"]
 
-        # 4) KSP 候選與 WECMP
-        paths = [P_best]
+        # 2) KSP 候選
+        all_paths: List[List[str]] = [P_best]
         if yen_ksp is not None and K > 1:
             ksp = yen_ksp(H, src, dst, K=K, weight="cspf_cost")
-            # 去掉第一條（已包含），再合併
             for p in ksp:
-                if p != P_best:
-                    paths.append(p)
+                if p and p not in all_paths:
+                    all_paths.append(p)
 
-        # 只保留 Δcost ≤ theta
-        costs = []
-        keep_paths = []
-        for p in paths:
+        # 3) 依 Δcost 與 SLA 過濾；同時紀錄被 SLA 濾掉的候選
+        keep_paths: List[List[str]] = []
+        costs: List[float] = []
+        filtered_sla: List[str] = []
+
+        for p in all_paths:
             c = sum(H[p[i]][p[i+1]]["cspf_cost"] for i in range(len(p)-1))
-            if c <= best_cost * (1.0 + theta) + 1e-12 and path_sla_ok(H, p, cls_params):
+            ok_sla, dsum, lsum, reason = eval_path_sla(H, p, cls_params)
+            if c <= best_cost * (1.0 + theta) + 1e-12 and ok_sla:
                 keep_paths.append(p)
                 costs.append(c)
+            elif not ok_sla:
+                filtered_sla.append(f"{'->'.join(p)}|delay={dsum:.3f}|loss={lsum:.6f}|viol={reason}")
 
-        # softmax(exp(-τ·cost))
         if not keep_paths:
-            return P_best, best_cost, [], []
-        exps = [math.exp(-tau * (c - best_cost)) for c in costs]  # 以 best 作基準避免 underflow
+            return [], math.inf, [], [], filtered_sla
+
+        # 4) WECMP 權重（softmax on -cost，相對 best）
+        exps = [math.exp(-tau * (c - min(costs))) for c in costs]
         s = sum(exps)
         weights = [x / s for x in exps] if s > 0 else [1.0/len(exps)] * len(exps)
-        return keep_paths[0], best_cost, keep_paths, weights
+
+        return keep_paths[0], costs[0], keep_paths, weights, filtered_sla
 
     return pick_for_pair  # type: ignore
 
@@ -266,6 +274,59 @@ def ensure_edge_class(d: Dict[Tuple[str, str], Dict[str, float]], e: Tuple[str, 
     if e not in d:
         d[e] = {}
     d[e].setdefault(cls, 0.0)
+
+def write_edge_usage_csv(
+    G: nx.Graph,
+    reserved: Dict[Tuple[str, str], Dict[str, float]],
+    usage:    Dict[Tuple[str, str], Dict[str, float]],
+    out_csv: Path,
+    *,
+    headroom: Optional[float] = None
+) -> None:
+    """
+    輸出每邊每級的 reserve/usage/residual 到 CSV。
+    欄位：
+      u,v,edge,bw_mbps,class,reserve_mbps,usage_mbps,residual_mbps,utilization,
+      cap_with_headroom,headroom_violated
+    """
+    out_csv.parent.mkdir(parents=True, exist_ok=True)
+    with out_csv.open("w", newline="", encoding="utf-8") as f:
+        w = csv.writer(f)
+        w.writerow([
+            "u","v","edge","bw_mbps","class",
+            "reserve_mbps","usage_mbps","residual_mbps","utilization",
+            "cap_with_headroom","headroom_violated"
+        ])
+
+        for (u, v), rmap in reserved.items():
+            # 取邊的 bw（圖是無向，兩向都試）
+            bw = ""
+            if G.has_edge(u, v):
+                bw = float(G[u][v].get("bw_mbps", ""))
+            elif G.has_edge(v, u):
+                bw = float(G[v][u].get("bw_mbps", ""))
+
+            umap = usage.get((u, v), {})
+            classes = sorted(set(rmap.keys()) | set(umap.keys()))
+            for cls in classes:
+                r = float(rmap.get(cls, 0.0))
+                uval = float(umap.get(cls, 0.0))
+                residual = r - uval
+                util = (uval / r) if r > 0 else (0.0 if uval == 0 else float("inf"))
+
+                cap_head = ""
+                violated = ""
+                if headroom is not None:
+                    cap_head = r * (1.0 - float(headroom))
+                    violated = (uval > cap_head + 1e-9)
+
+                w.writerow([
+                    u, v, f"{u}-{v}", bw, cls,
+                    f"{r:.6f}", f"{uval:.6f}", f"{residual:.6f}",
+                    (f"{util:.6f}" if util != float("inf") else "inf"),
+                    (f"{cap_head:.6f}" if cap_head != "" else ""),
+                    (int(violated) if violated != "" else "")
+                ])
 
 
 # ------------------------- CLI main -------------------------
@@ -339,7 +400,8 @@ def main() -> None:
             "flow_id","src","dst","topic",
             "class_req","class_admitted","rate_mbps","admitted","reason",
             "path","path_cost","sum_delay_ms","sum_loss",
-            "wecmp_candidates","wecmp_weights"
+            "sla_maxDelay_ms","sla_maxLoss",
+            "wecmp_candidates","wecmp_weights","wecmp_filtered_sla"
         ])
 
         for row in flows:
@@ -349,30 +411,32 @@ def main() -> None:
             topic = (row.get("topic") or "").strip()
             rate  = float(row.get("rate_mbps", 0.0) or 0.0)
 
-            # 忽略多播（有 subs 就註記跳過）
+            # 忽略多播（有 subs 就註記跳過）——多播由 routing/steiner.py 處理
             subs = (row.get("subs") or "").strip()
             if subs:
                 w.writerow([fid, src, dst, topic, "", "", rate, 0, "multicast_not_supported_in_cspf.py",
-                            "", "", "", "", ""])
+                            "", "", "", "", "", "", "", ""])
                 continue
 
-            # 解析 class：flows.csv 的 'class' 優先生效；否則從 topic_map 推出
-            cls_req = (row.get("class") or "").strip()
+            # flows.csv 直接指定 class 可覆蓋 topic_map（也相容 'qos' 欄位）
+            cls_req = (row.get("class") or row.get("qos") or "").strip()
             if not cls_req:
                 cls_req = topic_to_class(topic, qos_cfg) or ""
 
             if not cls_req:
                 w.writerow([fid, src, dst, topic, "", "", rate, 0, "no_class_for_topic",
-                            "", "", "", "", ""])
+                            "", "", "", "", "", "", "", ""])
                 continue
             if cls_req not in class_params:
                 # 用預設參數也能跑；但標記一下
                 class_params.setdefault(cls_req, ClassParams())
-            params = class_params[cls_req]
+            params_req = class_params[cls_req]
+            sla_dmax = params_req.maxDelay_ms if params_req.maxDelay_ms is not None else ""
+            sla_lmax = params_req.maxLoss if params_req.maxLoss is not None else ""
 
             # 準備挑路器（回傳一個針對 (src,dst) 的挑選函式）
             pick_for_pair = cspf_pick_path(
-                G, cls_req, rate, reserved, usage, params,
+                G, cls_req, rate, reserved, usage, params_req,
                 headroom=float(args.headroom),
                 theta=float(args.theta),
                 tau=float(args.tau),
@@ -387,15 +451,23 @@ def main() -> None:
             sel_cost = math.inf
             wecmp_paths: List[List[str]] = []
             wecmp_weights: List[float] = []
+            filtered_sla_info: List[str] = []
             cls_ok = ""
+            sum_delay = 0.0
+            sum_loss  = 0.0
 
             for cls_try in tried_classes:
                 params_try = class_params.get(cls_try, ClassParams())
-                best, cost, cands, weights = pick_for_pair(src, dst)
+                best, cost, cands, weights, filtered_sla = pick_for_pair(src, dst)
+                # 累積當前 class 嘗試的 filtered 資訊（用於診斷）
+                if filtered_sla:
+                    filtered_sla_info.extend(f"[{cls_try}] " + s for s in filtered_sla)
+
                 if not best:
-                    reason = "no_feasible_path"
+                    reason = "no_feasible_path_or_sla"
                     continue
-                # Admission 已在子圖過濾，這裡正式鎖定用量
+
+                # Admission 正式鎖定用量（再次保險檢查）
                 ok_all = True
                 sum_delay = 0.0
                 sum_loss  = 0.0
@@ -405,7 +477,6 @@ def main() -> None:
                     sum_delay += float(d.get("delay_ms", 1.0))
                     sum_loss  += float(d.get("loss", 0.0))
                     ekey = ek(u, v)
-                    # 再次保險檢查
                     cap = float(reserved.get(ekey, {}).get(cls_try, 0.0))
                     use = float(usage.get(ekey, {}).get(cls_try, 0.0))
                     if use + rate > cap * (1.0 - float(args.headroom)) + 1e-9:
@@ -428,24 +499,33 @@ def main() -> None:
                 admitted = 1
                 reason = "ok"
                 cls_ok = cls_try
-                # 寫出並跳出降級嘗試
-                w.writerow([
-                    fid, src, dst, topic,
-                    cls_req, cls_ok, rate, admitted, reason,
-                    "->".join(sel_path), f"{sel_cost:.6f}", f"{sum_delay:.3f}", f"{sum_loss:.6f}",
-                    "|".join("->".join(p) for p in wecmp_paths),
-                    "|".join(f"{x:.4f}" for x in wecmp_weights)
-                ])
                 break
 
-            if not admitted:
+            # 寫出
+            if admitted:
+                w.writerow([
+                    fid, src, dst, topic,
+                    cls_req, cls_ok, rate, 1, reason,
+                    "->".join(sel_path), f"{sel_cost:.6f}", f"{sum_delay:.3f}", f"{sum_loss:.6f}",
+                    sla_dmax, sla_lmax,
+                    "|".join("->".join(p) for p in wecmp_paths),
+                    "|".join(f"{x:.4f}" for x in wecmp_weights),
+                    " || ".join(filtered_sla_info)
+                ])
+            else:
                 w.writerow([
                     fid, src, dst, topic,
                     cls_req, "", rate, 0, reason,
-                    "", "", "", "", ""
+                    "", "", "", "",
+                    sla_dmax, sla_lmax,
+                    "", "", " || ".join(filtered_sla_info)
                 ])
 
     print(f"[OK] per-flow written -> {out_csv}")
+    edge_usage_csv = out_csv.parent / "edge_usage.csv"
+    write_edge_usage_csv(G, reserved, usage, edge_usage_csv, headroom=float(args.headroom))
+    print(f"[OK] edge-usage written -> {edge_usage_csv}")
+
 
 
 if __name__ == "__main__":

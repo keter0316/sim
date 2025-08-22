@@ -14,7 +14,6 @@ import matplotlib.pyplot as plt
 
 @dataclass
 class EdgeMetrics:
-    """Per-link telemetry / radio metrics stored under G[u][v]['metrics']."""
     delay_ms: float = 1.0
     loss: float = 0.0
     bw_mbps: float = 1000.0
@@ -28,60 +27,48 @@ class EdgeMetrics:
 @dataclass
 class Topology:
     G: nx.Graph = field(default_factory=nx.Graph)
-    # Per-edge, per-class reservation/usage (for Admission / scheduling)
-    reserved: Dict[Tuple[str, str], Dict[str, float]] = field(default_factory=dict)
-    usage:    Dict[Tuple[str, str], Dict[str, float]] = field(default_factory=dict)
-
-    # ---------- Construction ----------
+    reserved: Dict[Tuple[str,str], Dict[str,float]] = field(default_factory=dict)
+    usage:    Dict[Tuple[str,str], Dict[str,float]] = field(default_factory=dict)
 
     @staticmethod
-    def from_csv(edges_csv: Path, nodes_csv: Optional[Path] = None) -> "Topology":
-        """
-        Build topology from edges_all.csv (and optional nodes.csv).
-
-        edges_all.csv expected columns:
-          src_switch,dst_switch,weight,bw_mbps,type,delay_ms,loss,etx,rssi,snr
-        nodes.csv expected columns:
-          node_id,role    (role e.g., 'host'/'access'/'core'/'switch')
-        """
+    def from_csv(p: Path) -> "Topology":
+        """僅讀 edges_all.csv；邊屬性統一用 'weight'。"""
         topo = Topology()
-        # Load edges
-        with edges_csv.open(newline="", encoding="utf-8") as f:
-            reader = csv.DictReader(f)
-            for row in reader:
-                u = row["src_switch"].strip()
-                v = row["dst_switch"].strip()
-
-                # Attributes with sane defaults if missing
+        with p.open(newline="", encoding="utf-8") as f:
+            for row in csv.DictReader(f):
+                u, v = row["src_switch"].strip(), row["dst_switch"].strip()
                 w = float(row.get("weight", 1.0))
                 bw = float(row.get("bw_mbps", 1000.0))
-                etype = row.get("type", "").strip()
-
-                # Edge metrics
-                metrics = EdgeMetrics(
-                    delay_ms=float(row.get("delay_ms", 1.0) or 1.0),
-                    loss=float(row.get("loss", 0.0) or 0.0),
-                    bw_mbps=bw,
-                    etx=float(row.get("etx", 1.0) or 1.0),
-                    rssi=float(row.get("rssi", -50.0) or -50.0),
-                    snr=float(row.get("snr", 30.0) or 30.0),
-                )
-
-                # Add/Update undirected edge
-                # Keep standard attr name 'weight' for algorithms
                 topo.G.add_edge(
                     u, v,
-                    weight=w,
-                    bw_mbps=bw,
-                    type=etype,
-                    metrics=metrics,
+                    weight=w,                              # <<< 統一用 weight
+                    metrics=EdgeMetrics(
+                        delay_ms=float(row.get("delay_ms", 1.0) or 1.0),
+                        loss=float(row.get("loss", 0.0) or 0.0),
+                        bw_mbps=bw,
+                        etx=float(row.get("etx", 1.0) or 1.0),
+                        rssi=float(row.get("rssi", -50.0) or -50.0),
+                        snr=float(row.get("snr", 30.0) or 30.0),
+                    )
                 )
-
-        # Optionally load node roles
-        if nodes_csv and nodes_csv.exists():
-            topo.load_nodes_csv(nodes_csv)
-
         return topo
+    
+    @staticmethod
+    def from_edges_and_nodes(edges_csv: Path, nodes_csv: Optional[Path] = None) -> "Topology":
+        """（選）同時讀 edges + nodes，把 role 存成 node 屬性 ntype。"""
+        topo = Topology.from_csv(edges_csv)
+        if nodes_csv and nodes_csv.exists():
+            with nodes_csv.open(newline="", encoding="utf-8") as f:
+                for row in csv.DictReader(f):
+                    n = row["node_id"].strip()
+                    role = (row.get("role") or "").strip()
+                    if n:
+                        topo.G.add_node(n, ntype=role or topo.G.nodes.get(n, {}).get("ntype"))
+        return topo
+    
+    def edge_key(self, u, v):
+        return (u, v) if u <= v else (v, u)
+    
 
     def load_nodes_csv(self, nodes_csv: Path) -> None:
         """Attach node roles from nodes.csv (node_id,role)."""

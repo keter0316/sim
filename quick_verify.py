@@ -19,6 +19,7 @@ quick_verify.py
 並輸出圖：
 - plots/path_len_hist.png（以 per_flow 的 path 或 KSP 第一條製作）
 - plots/cost_cdf.png（以 per_flow 的 path_cost 製作）
+- plots/residual_cdf.png（以 per-class per-edge 殘額 residual=limit-usage 製作）
 """
 
 from __future__ import annotations
@@ -179,11 +180,12 @@ def check_ecmp_vs_ksp(G: nx.Graph, fdb_obj, ksp_obj, reports_dir: Path) -> Tuple
     return checked, mismatches
 
 
-def check_admission(G: nx.Graph, qos: dict, per_flow_rows: List[dict], reports_dir: Path) -> Tuple[int, int]:
+def check_admission(G: nx.Graph, qos: dict, per_flow_rows: List[dict], reports_dir: Path) -> Tuple[int, int, List[float]]:
     """
     以 per_flow.csv 的 admitted flows 聚合每條邊的 usage（依 class），
     與 qos.yaml 的 reservations 比對，確認 usage ≤ reserve*(1-headroom)。
-    回傳 (checked_edges, violations)
+    回傳 (checked_edges, violations, residual_list)
+    residual = limit - usage，其中 limit = reserve*(1-headroom)
     """
     headroom = float(qos.get("headroom", 0.10))
     reservations_cfg = qos.get("reservations", {}) or {}
@@ -211,6 +213,8 @@ def check_admission(G: nx.Graph, qos: dict, per_flow_rows: List[dict], reports_d
     rows = []
     violations = 0
     checked = 0
+    residuals: List[float] = []
+
     for e, rmap in reserve.items():
         u, v = e
         ucls = usage.get(e, {})
@@ -220,6 +224,7 @@ def check_admission(G: nx.Graph, qos: dict, per_flow_rows: List[dict], reports_d
             use = float(ucls.get(cls, 0.0))
             limit = cap * (1.0 - headroom)
             residual = limit - use
+            residuals.append(residual)
             ok = (use <= limit + 1e-9)
             if not ok:
                 violations += 1
@@ -241,7 +246,7 @@ def check_admission(G: nx.Graph, qos: dict, per_flow_rows: List[dict], reports_d
         for r in rows:
             w.writerow(r)
 
-    return checked, violations
+    return checked, violations, residuals
 
 
 def check_cost_trend(
@@ -382,6 +387,27 @@ def plot_cost_cdf(per_flow_rows: List[dict], G: nx.Graph, plots_dir: Path):
     plt.close()
 
 
+def plot_residual_cdf(residuals: List[float], plots_dir: Path):
+    """
+    以 residual = reserve*(1-headroom) - usage 的集合畫 CDF。
+    含負值（代表違規）；可直接觀察 tail 風險。
+    """
+    if not residuals:
+        return
+    xs = sorted(residuals)
+    ys = [i / len(xs) for i in range(1, len(xs) + 1)]
+
+    plt.figure()
+    plt.plot(xs, ys, drawstyle="steps-post")
+    plt.xlabel("Residual Mbps (limit - usage)")
+    plt.ylabel("CDF")
+    plt.title("Per-edge per-class residual CDF")
+    out = plots_dir / "residual_cdf.png"
+    plt.tight_layout()
+    plt.savefig(out, dpi=160)
+    plt.close()
+
+
 # ------------------------- CLI -------------------------
 
 def build_cli() -> argparse.ArgumentParser:
@@ -428,8 +454,9 @@ def main():
         print("[ECMP/KSP] skip (missing FDB or KSP JSON)")
 
     # 2) Admission
+    residuals: List[float] = []
     if qos and per_flow_rows:
-        checked, violations = check_admission(G, qos, per_flow_rows, reports_dir)
+        checked, violations, residuals = check_admission(G, qos, per_flow_rows, reports_dir)
         print(f"[Admission] checked={checked}, violations={violations} -> {reports_dir/'admission_check.csv'}")
     else:
         print("[Admission] skip (missing qos.yaml or per_flow.csv)")
@@ -441,7 +468,8 @@ def main():
     # Plots
     plot_path_len_hist(per_flow_rows, ksp_obj, plots_dir)
     plot_cost_cdf(per_flow_rows, G, plots_dir)
-    print(f"[Plots] saved to {plots_dir}/path_len_hist.png and {plots_dir}/cost_cdf.png")
+    plot_residual_cdf(residuals, plots_dir)
+    print(f"[Plots] saved to {plots_dir}/path_len_hist.png, {plots_dir}/cost_cdf.png and {plots_dir}/residual_cdf.png")
 
 
 if __name__ == "__main__":
